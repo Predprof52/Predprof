@@ -1,0 +1,56 @@
+mport RPi.GPIO as GPIO
+import time
+import cv2
+from mfrc522 import SimpleMFRC522
+
+# Настройка GPIO
+RELAY_PIN = 18  # Пин, к которому подключено реле
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(RELAY_PIN, GPIO.OUT)
+
+# Инициализация RFID-считывателя
+reader = SimpleMFRC522()
+
+# Инициализация камеры
+camera = cv2.VideoCapture(0)
+
+def open_gate():
+    print("Открытие ворот...")
+    GPIO.output(RELAY_PIN, GPIO.HIGH)  # Включаем реле
+    time.sleep(2)  # Держим реле включенным 2 секунды
+    GPIO.output(RELAY_PIN, GPIO.LOW)  # Выключаем реле
+    print("Ворота закрыты.")
+
+def capture_image(car_id):
+    ret, frame = camera.read()
+    if ret:
+        filename = f"car_{car_id}.jpg"
+        cv2.imwrite(filename, frame)
+        print(f"Изображение сохранено: {filename}")
+    else:
+        print("Ошибка захвата изображения.")
+
+def log_entry_exit(car_id):
+    with open("access_log.txt", "a") as log_file:
+        log_file.write(f"ID: {car_id}, Время: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+try:
+    print("Поднесите ключ-карту к считывателю...")
+    while True:
+        id, text = reader.read()
+        print(f"Считан ID: {id}, текст: {text.strip()}")
+
+        # Здесь можно добавить проверку ID карты
+        if id == YOUR_AUTHORIZED_CARD_ID:  # Замените на ID авторизованной карты
+            open_gate()
+            capture_image(id)
+            log_entry_exit(id)
+        else:
+            print("Неавторизованная карта. Доступ запрещен.")
+
+except KeyboardInterrupt:
+    print("Программа остановлена.")
+finally:
+    GPIO.cleanup()
+    camera.release()
+    cv2.destroyAllWindows()
