@@ -1,56 +1,132 @@
-import RPi.GPIO as GPIO
-import time
-import cv2
-from mfrc522 import SimpleMFRC522
+#include <SPI.h>
+#include <MFRC522.h>
 
-# Настройка GPIO
-RELAY_PIN = 18  # Пин, к которому подключено реле
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(RELAY_PIN, GPIO.OUT)
+#define RST_PIN 9
+#define SS_PIN 10
+#define MOTION_SENSOR_PIN 3
+#define MOTOR_OPEN_PIN 6
+#define MOTOR_CLOSE_PIN 7
+#define OPEN_DURATION 3000
+#define CLOSE_DURATION 4000 // Увеличили время закрытия до 4 секунд
 
-# Инициализация RFID-считывателя
-reader = SimpleMFRC522()
+MFRC522 rfid(SS_PIN, RST_PIN);
+String allowedCards[] = {"144DB5A7"};
+int numAllowedCards = sizeof(allowedCards) / sizeof(allowedCards[0]);
 
-# Инициализация камеры
-camera = cv2.VideoCapture(0)
+enum GateState {
+  STATE_IDLE,
+  STATE_OPENING,
+  STATE_OPEN,
+  STATE_CLOSING
+};
 
-def open_gate():
-    print("Открытие ворот...")
-    GPIO.output(RELAY_PIN, GPIO.HIGH)  # Включаем реле
-    time.sleep(2)  # Держим реле включенным 2 секунды
-    GPIO.output(RELAY_PIN, GPIO.LOW)  # Выключаем реле
-    print("Ворота закрыты.")
+volatile bool motionDetected = false;
+GateState currentState = STATE_IDLE;
+unsigned long operationStartTime = 0;
 
-def capture_image(car_id):
-    ret, frame = camera.read()
-    if ret:
-        filename = f"car_{car_id}.jpg"
-        cv2.imwrite(filename, frame)
-        print(f"Изображение сохранено: {filename}")
-    else:
-        print("Ошибка захвата изображения.")
+void setup() {
+  Serial.begin(9600);
+  SPI.begin();
+  rfid.PCD_Init();
+  pinMode(MOTION_SENSOR_PIN, INPUT);
+  pinMode(MOTOR_OPEN_PIN, OUTPUT);
+  pinMode(MOTOR_CLOSE_PIN, OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(MOTION_SENSOR_PIN), motionInterrupt, CHANGE);
+  Serial.println("Поднесите карту к считывателю...");
+}
 
-def log_entry_exit(car_id):
-    with open("access_log.txt", "a") as log_file:
-        log_file.write(f"ID: {car_id}, Время: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+void loop() {
+  switch(currentState) {
+    case STATE_IDLE:
+      handleIdle();
+      break;
+    case STATE_OPENING:
+      handleOpening();
+      break;
+    case STATE_OPEN:
+      handleOpen();
+      break;
+    case STATE_CLOSING:
+      handleClosing();
+      break;
+  }
+}
 
-try:
-    print("Поднесите ключ-карту к считывателю...")
-    while True:
-        id, text = reader.read()
-        print(f"Считан ID: {id}, текст: {text.strip()}")
+void handleIdle() {
+  if (checkRFID()) {
+    currentState = STATE_OPENING;
+    operationStartTime = millis();
+  }
+}
 
-        # Здесь можно добавить проверку ID карты
-        if id == YOUR_AUTHORIZED_CARD_ID:  # Замените на ID авторизованной карты
-            open_gate()
-            capture_image(id)
-            log_entry_exit(id)
-        else:
-            print("Неавторизованная карта. Доступ запрещен.")
+bool checkRFID() {
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    String cardID = getCardID();
+    Serial.print("UID метки: ");
+    Serial.println(cardID);
+    
+    for (int i = 0; i < numAllowedCards; i++) {
+      if (cardID == allowedCards[i]) {
+        Serial.println("Доступ разрешен!");
+        rfid.PICC_HaltA();
+        rfid.PCD_StopCrypto1();
+        return true;
+      }
+    }
+    Serial.println("Доступ запрещен!");
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+  return false;
+}
 
-except KeyboardInterrupt:
-    print("Программа остановлена.")
-finally:
-    GPIO.cleanup()
-    camera.release()
-    cv2.destroyAllWindows()
+void handleOpening() {
+  digitalWrite(MOTOR_OPEN_PIN, 1);
+  digitalWrite(MOTOR_CLOSE_PIN, 165);
+  
+  if (millis() - operationStartTime >= OPEN_DURATION) {
+    stopMotor();
+    currentState = STATE_OPEN;
+    Serial.println("Ворота открыты");
+  }
+}
+
+void handleOpen() {
+  if (!motionDetected) {
+    currentState = STATE_CLOSING;
+    operationStartTime = millis();
+    Serial.println("Начинаем закрытие");
+  }
+}
+
+void handleClosing() {
+  digitalWrite(MOTOR_CLOSE_PIN, 0);
+  digitalWrite(MOTOR_OPEN_PIN, 165);
+  
+  if (millis() - operationStartTime >= CLOSE_DURATION) {
+    stopMotor();
+    currentState = STATE_IDLE;
+    Serial.println("Ворота закрыты. Поднесите карту к считывателю...");
+  }
+}
+
+void stopMotor() { 
+  digitalWrite(MOTOR_OPEN_PIN, LOW);
+  digitalWrite(MOTOR_CLOSE_PIN, LOW);
+}
+
+String getCardID() {
+  String cardID = "";
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    cardID.concat(String(rfid.uid.uidByte[i] < 0x10 ? "0" : ""));
+    cardID.concat(String(rfid.uid.uidByte[i], HEX));
+  }
+  cardID.toUpperCase();
+  return cardID;
+}
+
+void motionInterrupt() {
+  motionDetected = digitalRead(MOTION_SENSOR_PIN);
+  Serial.print("Движение ");
+  Serial.println(motionDetected ? "обнаружено" : "закончилось");
+} 
